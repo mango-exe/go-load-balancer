@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -15,8 +16,8 @@ import (
 
 /*
  TODO:
- - health checks for servers
- - handle tls connections for servers
+ - health checks for servers [x]
+ - handle tls connections for servers [x]
  - rate limit
  - least connections load balance algorithm
  - command line configuration for load balancer
@@ -29,6 +30,7 @@ type LoadBalancer struct {
 	currentUrl           *url.URL
 	stickySessionEnabled bool
 	healthChecksEnabled  bool
+	tlsEnabled           bool
 }
 
 func (l *LoadBalancer) stickySession() {
@@ -139,23 +141,36 @@ func (l *LoadBalancer) runHealthChecks() {
 	}()
 }
 
-func main() {
+func (l *LoadBalancer) run() {
 	var rawURLs = []string{"http://127.0.0.1:8081", "http://127.0.0.1:8082"}
+	l.parseUrls(rawURLs)
 
-	loadBalancer := LoadBalancer{
-		stickySessionEnabled: true,
-		healthChecksEnabled:  true,
-	}
-
-	loadBalancer.parseUrls(rawURLs)
-
-	if loadBalancer.healthChecksEnabled {
-		loadBalancer.runHealthChecks()
+	if l.healthChecksEnabled {
+		l.runHealthChecks()
 	}
 
 	r := gin.Default()
 
-	r.Any("/*path", loadBalancer.handleRequest())
+	r.Any("/*path", l.handleRequest())
 
-	r.Run()
+	if l.tlsEnabled {
+		certFilePath := "./certs/cert.pem"
+		keyFilePath := "./certs/key.pem"
+
+		log.Fatal(r.RunTLS(":8443", certFilePath, keyFilePath))
+
+	} else {
+		r.Run()
+	}
+}
+
+func main() {
+
+	loadBalancer := LoadBalancer{
+		stickySessionEnabled: true,
+		healthChecksEnabled:  true,
+		tlsEnabled:           true,
+	}
+
+	loadBalancer.run()
 }
