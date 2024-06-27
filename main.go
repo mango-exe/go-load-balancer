@@ -18,14 +18,19 @@ import (
  TODO:
  - health checks for servers [x]
  - handle tls connections for servers [x]
- - rate limit
+ - rate limit []
  - least connections load balance algorithm
- - command line configuration for load balancer
+ - command line configuration for load balancer []
 */
+
+type ServerInfo struct {
+	url         *url.URL
+	connections int
+}
 
 type LoadBalancer struct {
 	ctx                  *gin.Context
-	urls                 []*url.URL
+	servers              map[int]ServerInfo
 	current              int
 	currentUrl           *url.URL
 	stickySessionEnabled bool
@@ -80,23 +85,22 @@ func (l *LoadBalancer) proxyRequest() {
 }
 
 func (l *LoadBalancer) roundRobin() *url.URL {
-	l.current = (l.current + 1) % len(l.urls)
-	return l.urls[l.current]
+	l.current = (l.current + 1) % len(l.servers)
+	return l.servers[l.current].url
 }
 
 func (l *LoadBalancer) parseUrls(rawUrls []string) {
-	var urls []*url.URL
-
-	for _, rawUrl := range rawUrls {
+	for idx, rawUrl := range rawUrls {
 		parsedUrl, err := url.Parse(rawUrl)
 
 		if err != nil {
 			fmt.Println(err)
 		}
-		urls = append(urls, parsedUrl)
+		serverInfo := ServerInfo{
+			url: parsedUrl,
+		}
+		l.servers[idx] = serverInfo
 	}
-
-	l.urls = urls
 }
 
 func (l *LoadBalancer) handleRequest() gin.HandlerFunc {
@@ -114,15 +118,15 @@ func (l *LoadBalancer) handleRequest() gin.HandlerFunc {
 }
 
 func (l *LoadBalancer) healthCheck() {
-	for _, url := range l.urls {
-		healthCheckUrl := fmt.Sprintf("%s/health-check", url.String())
+	for _, server := range l.servers {
+		healthCheckUrl := fmt.Sprintf("%s/health-check", server.url.String())
 		response, err := http.Get(healthCheckUrl)
 		var message string
 		if err != nil || response.StatusCode != http.StatusOK {
-			message = fmt.Sprintf("Server %s could not respond %s", url.String(), err)
+			message = fmt.Sprintf("Server %s could not respond %s", server.url.String(), err)
 			fmt.Println(message)
 		} else {
-			message = fmt.Sprintf("Server %s status: %s", url.String(), response.Status)
+			message = fmt.Sprintf("Server %s status: %s", server.url.String(), response.Status)
 			fmt.Println(message)
 		}
 	}
@@ -169,7 +173,8 @@ func main() {
 	loadBalancer := LoadBalancer{
 		stickySessionEnabled: true,
 		healthChecksEnabled:  true,
-		tlsEnabled:           true,
+		tlsEnabled:           false,
+		servers:              make(map[int]ServerInfo),
 	}
 
 	loadBalancer.run()
