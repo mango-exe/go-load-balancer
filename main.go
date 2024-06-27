@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,6 +28,7 @@ type LoadBalancer struct {
 	current              int
 	currentUrl           *url.URL
 	stickySessionEnabled bool
+	healthChecksEnabled  bool
 }
 
 func (l *LoadBalancer) stickySession() {
@@ -108,14 +111,47 @@ func (l *LoadBalancer) handleRequest() gin.HandlerFunc {
 	}
 }
 
+func (l *LoadBalancer) healthCheck() {
+	for _, url := range l.urls {
+		healthCheckUrl := fmt.Sprintf("%s/health-check", url.String())
+		response, err := http.Get(healthCheckUrl)
+		var message string
+		if err != nil || response.StatusCode != http.StatusOK {
+			message = fmt.Sprintf("Server %s could not respond %s", url.String(), err)
+			fmt.Println(message)
+		} else {
+			message = fmt.Sprintf("Server %s status: %s", url.String(), response.Status)
+			fmt.Println(message)
+		}
+	}
+}
+
+func (l *LoadBalancer) runHealthChecks() {
+	ticker := time.NewTicker(30 * time.Second)
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				l.healthCheck()
+			}
+		}
+	}()
+}
+
 func main() {
 	var rawURLs = []string{"http://127.0.0.1:8081", "http://127.0.0.1:8082"}
 
 	loadBalancer := LoadBalancer{
 		stickySessionEnabled: true,
+		healthChecksEnabled:  true,
 	}
 
 	loadBalancer.parseUrls(rawURLs)
+
+	if loadBalancer.healthChecksEnabled {
+		loadBalancer.runHealthChecks()
+	}
 
 	r := gin.Default()
 
