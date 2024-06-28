@@ -44,6 +44,7 @@ type LoadBalancer struct {
 	stickySessionEnabled bool
 	healthChecksEnabled  bool
 	tlsEnabled           bool
+	rateLimitEnabled     bool
 	loadBalancerType     LoadBalancerType
 }
 
@@ -150,12 +151,21 @@ func (l *LoadBalancer) handleRequest() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		l.ctx = ctx
 
+		if l.rateLimitEnabled {
+			limit := l.rateLimit()
+			fmt.Println(limit)
+
+			if limit {
+				ctx.JSON(http.StatusTooManyRequests, gin.H{"message": "Too many requests"})
+				return
+			}
+		}
+
 		if l.stickySessionEnabled {
 			l.stickySession()
 		} else {
 			l.currentUrl = l.balanceRequest()
 		}
-		fmt.Println(l.currentUrl)
 
 		l.proxyRequest()
 	}
@@ -196,6 +206,34 @@ func (l *LoadBalancer) runHealthChecks() {
 	}()
 }
 
+const requestLimit = 100
+const rateLimitWindow = time.Minute
+
+var requestCounts = make(map[string]int)
+var requestTimestamps = make(map[string]time.Time)
+
+func (l *LoadBalancer) rateLimit() bool {
+	clientIp := l.ctx.ClientIP()
+	now := time.Now()
+
+	if requestCounts[clientIp] == 0 {
+		requestTimestamps[clientIp] = now
+	}
+
+	elapsed := now.Sub(requestTimestamps[clientIp])
+	if elapsed > rateLimitWindow {
+		requestCounts[clientIp] = 0
+		requestTimestamps[clientIp] = now
+	}
+
+	requestCounts[clientIp]++
+
+	if requestCounts[clientIp] > requestLimit {
+		return true
+	}
+	return false
+}
+
 func (l *LoadBalancer) run() {
 	var rawURLs = []string{"http://127.0.0.1:8081", "http://127.0.0.1:8082"}
 	l.parseUrls(rawURLs)
@@ -225,6 +263,7 @@ func main() {
 		stickySessionEnabled: true,
 		healthChecksEnabled:  true,
 		tlsEnabled:           false,
+		rateLimitEnabled:     true,
 		servers:              make(map[int]*ServerInfo),
 		loadBalancerType:     LeastConnections,
 	}
