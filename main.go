@@ -8,6 +8,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,9 +20,16 @@ import (
  - health checks for servers [x]
  - handle tls connections for servers [x]
  - rate limit []
- - least connections load balance algorithm
+ - least connections load balance algorithm [x]
  - command line configuration for load balancer []
 */
+
+type LoadBalancerType int
+
+const (
+	RoundRobin = iota
+	LeastConnections
+)
 
 type ServerInfo struct {
 	url         *url.URL
@@ -30,18 +38,19 @@ type ServerInfo struct {
 
 type LoadBalancer struct {
 	ctx                  *gin.Context
-	servers              map[int]ServerInfo
+	servers              map[int]*ServerInfo
 	current              int
 	currentUrl           *url.URL
 	stickySessionEnabled bool
 	healthChecksEnabled  bool
 	tlsEnabled           bool
+	loadBalancerType     LoadBalancerType
 }
 
 func (l *LoadBalancer) stickySession() {
 	existingCookie, err := l.ctx.Request.Cookie("sticky-session")
 
-	currentUrl := l.roundRobin()
+	currentUrl := l.balanceRequest()
 
 	if err != nil {
 		id := uuid.New()
@@ -69,7 +78,7 @@ func (l *LoadBalancer) stickySession() {
 
 			l.currentUrl = parsedUrl
 		} else {
-			l.roundRobin()
+			l.balanceRequest()
 		}
 	}
 }
@@ -84,23 +93,57 @@ func (l *LoadBalancer) proxyRequest() {
 	proxy.ServeHTTP(l.ctx.Writer, l.ctx.Request)
 }
 
+func (l *LoadBalancer) leastConnections() *url.URL {
+	minConnections := int(^uint(0) >> 1)
+	var selectedUrl *url.URL
+	var currentKey int
+
+	for key, server := range l.servers {
+		if server.connections < minConnections {
+			minConnections = server.connections
+			selectedUrl = server.url
+			currentKey = key
+		}
+	}
+
+	l.servers[currentKey].connections++
+	return selectedUrl
+}
+
 func (l *LoadBalancer) roundRobin() *url.URL {
 	l.current = (l.current + 1) % len(l.servers)
 	return l.servers[l.current].url
 }
 
-func (l *LoadBalancer) parseUrls(rawUrls []string) {
-	for idx, rawUrl := range rawUrls {
-		parsedUrl, err := url.Parse(rawUrl)
-
-		if err != nil {
-			fmt.Println(err)
-		}
-		serverInfo := ServerInfo{
-			url: parsedUrl,
-		}
-		l.servers[idx] = serverInfo
+func (l *LoadBalancer) balanceRequest() *url.URL {
+	switch l.loadBalancerType {
+	case RoundRobin:
+		return l.roundRobin()
+	case LeastConnections:
+		return l.leastConnections()
 	}
+
+	return nil
+}
+
+func (l *LoadBalancer) parseUrls(rawUrls []string) {
+	var wg sync.WaitGroup
+	for idx, rawUrl := range rawUrls {
+		wg.Add(1)
+		go func(idx int, rawUrl string) {
+			defer wg.Done()
+			parsedUrl, err := url.Parse(rawUrl)
+
+			if err != nil {
+				fmt.Println(err)
+			}
+			serverInfo := ServerInfo{
+				url: parsedUrl,
+			}
+			l.servers[idx] = &serverInfo
+		}(idx, rawUrl)
+	}
+	wg.Wait()
 }
 
 func (l *LoadBalancer) handleRequest() gin.HandlerFunc {
@@ -110,26 +153,34 @@ func (l *LoadBalancer) handleRequest() gin.HandlerFunc {
 		if l.stickySessionEnabled {
 			l.stickySession()
 		} else {
-			l.currentUrl = l.roundRobin()
+			l.currentUrl = l.balanceRequest()
 		}
+		fmt.Println(l.currentUrl)
 
 		l.proxyRequest()
 	}
 }
 
 func (l *LoadBalancer) healthCheck() {
+	var wg sync.WaitGroup
 	for _, server := range l.servers {
-		healthCheckUrl := fmt.Sprintf("%s/health-check", server.url.String())
-		response, err := http.Get(healthCheckUrl)
-		var message string
-		if err != nil || response.StatusCode != http.StatusOK {
-			message = fmt.Sprintf("Server %s could not respond %s", server.url.String(), err)
-			fmt.Println(message)
-		} else {
-			message = fmt.Sprintf("Server %s status: %s", server.url.String(), response.Status)
-			fmt.Println(message)
-		}
+		wg.Add(1)
+
+		go func(server *ServerInfo) {
+			defer wg.Done()
+			healthCheckUrl := fmt.Sprintf("%s/health-check", server.url.String())
+			response, err := http.Get(healthCheckUrl)
+			var message string
+			if err != nil || response.StatusCode != http.StatusOK {
+				message = fmt.Sprintf("Server %s could not respond %s", server.url.String(), err)
+				fmt.Println(message)
+			} else {
+				message = fmt.Sprintf("Server %s status: %s", server.url.String(), response.Status)
+				fmt.Println(message)
+			}
+		}(server)
 	}
+	wg.Wait()
 }
 
 func (l *LoadBalancer) runHealthChecks() {
@@ -174,7 +225,8 @@ func main() {
 		stickySessionEnabled: true,
 		healthChecksEnabled:  true,
 		tlsEnabled:           false,
-		servers:              make(map[int]ServerInfo),
+		servers:              make(map[int]*ServerInfo),
+		loadBalancerType:     LeastConnections,
 	}
 
 	loadBalancer.run()
