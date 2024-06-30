@@ -1,0 +1,19 @@
+# List of servers
+servers:
+  - "http://127.0.0.1:8081"
+  - "http://127.0.0.1:8082"
+
+# Enable or disable sticky sessions
+stickySessions: true
+
+# Enable or disable health checks
+healthCheck: true
+
+# Enable or disable TLS
+tls: false
+
+# Enable or disable rate limiting
+rateLimit: true
+
+# Type of load balancing
+type: "roundrobin"
